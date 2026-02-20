@@ -1,2 +1,4 @@
 # Equimon
-Real-time IMM monitoring via MQTT &amp; PostgreSQL
+**Real-time IMM (Injection Molding Machine) monitoring platform**
+
+Сycle times, OEE, temperatures, downtimes.
