@@ -68,6 +68,18 @@ services:
     restart: unless-stopped
     networks: [imm-net]
 
+  api:
+    build: ./EquimonApi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5000:8080"
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+    networks: [imm-net]
+    restart: unless-stopped
+
 volumes:
   emqx_data:
   emqx_log:

@@ -10,3 +10,25 @@ CREATE TABLE IF NOT EXISTS imm_data (
 );
 
 CREATE INDEX idx_machine_timestamp ON imm_data (machine_id, value_dt);
+
+CREATE TABLE IF NOT EXISTS departments (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    parent_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_departments_parent ON departments(parent_id);
+
+CREATE TABLE IF NOT EXISTS machines (
+    id SERIAL PRIMARY KEY,
+    serial_number VARCHAR(100) NOT NULL,
+    manufacturer VARCHAR(256) NOT NULL,
+    brand VARCHAR(100) NOT NULL,
+    model VARCHAR(100) NOT NULL,
+    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_machines_department ON machines(department_id);
+CREATE UNIQUE INDEX idx_machines_serial ON machines(serial_number);
