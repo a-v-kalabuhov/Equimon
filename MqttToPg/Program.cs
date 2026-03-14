@@ -23,34 +23,42 @@ mqttClient.ApplicationMessageReceivedAsync += async args =>
 
     Console.WriteLine($"Received: {topic} -> {payload}");
     
-    string sensor_value = string.Empty;
-    string? sensor_status = string.Empty;
-    DateTime value_dt = DateTime.Now;
-    double? sensor_val_f = null;
+    // New format: array of sensor readings
+    List<(string sensorId, DateTime valueDt, double? value, string? status)> readings;
     try
     {
+        readings = new List<(string, DateTime, double?, string?)>();
         using var doc = JsonDocument.Parse(payload);
         var root = doc.RootElement;
-        value_dt = root.TryGetProperty("timestamp", out var ts) ? DateTime.Parse(ts.GetString()!) : DateTime.UtcNow;
-        sensor_val_f = root.TryGetProperty("value", out var f) ? f.GetDouble() : null;
-        sensor_value = root.TryGetProperty("value", out var val) ? val.ToString() : string.Empty;
-        sensor_status = root.TryGetProperty("status", out var st) ? st.GetString() : null;
-        Console.WriteLine($"Parsed: {topic} -> value_dt={value_dt}; sensor_value={sensor_value}; sensor_val_f={sensor_val_f}; status={sensor_status}");
+        
+        if (root.ValueKind != JsonValueKind.Array)
+        {
+            Console.WriteLine("Error: Payload is not an array");
+            return;
+        }
+        
+        foreach (var item in root.EnumerateArray())
+        {
+            var sensorId = item.TryGetProperty("sensor_id", out var sid) ? sid.GetString()! : "unknown";
+            var timestamp = item.TryGetProperty("timestamp", out var ts) ? DateTime.Parse(ts.GetString()!) : DateTime.UtcNow;
+            var value = item.TryGetProperty("value", out var v) ? v.GetDouble() : (double?)null;
+            var status = item.TryGetProperty("status", out var st) ? st.GetString() : null;
+            
+            readings.Add((sensorId, timestamp, value, status));
+        }
+        
+        Console.WriteLine($"Parsed: {readings.Count} readings from {topic}");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error: {ex.Message}");
+        Console.WriteLine($"Error parsing payload: {ex.Message}");
         Console.WriteLine($"Stack: {ex.StackTrace}");
         return;
     }
 
-    // Parse machine/sensor from topic: imm/1/temp_sensor_001/value
+    // Parse machine from topic: imm/1/readings
     var parts = topic.Split('/');
     var machineId = parts[1];
-    var sensorId = parts[2];
-    var metric = parts[3];
-
-    Console.WriteLine($"Parsed: {topic} -> machineId={machineId}; sensorId={sensorId}; metric={metric}");
 
     var connString = "Host=postgres;Database=imm_db;Username=postgres;Password=public;Trust Server Certificate=true;Ssl Mode=Disable;Pooling=true;Minimum Pool Size=0;Maximum Pool Size=10;";
     await using var conn = new NpgsqlConnection(connString);
@@ -61,35 +69,34 @@ mqttClient.ApplicationMessageReceivedAsync += async args =>
     await using var cmd = new NpgsqlCommand(@"
         INSERT INTO imm_data (machine_id, sensor_id, metric, sensor_value, sensor_val_f, value_dt, sensor_status)
         VALUES (@machine_id, @sensor_id, @metric, @sensor_value, @sensor_val_f, @value_dt, @sensor_status)", conn);
-    Console.WriteLine($"Command created");
 
-    var p1 = cmd.Parameters.AddWithValue("machine_id", NpgsqlDbType.Text, machineId);
-    Console.WriteLine($"Params prepared: machine_id={p1.Value}");
-    var p2 = cmd.Parameters.AddWithValue("sensor_id", NpgsqlDbType.Text, sensorId);
-    Console.WriteLine($"Params prepared: sensor_id={p2.Value}");
-    var p3 = cmd.Parameters.AddWithValue("metric", NpgsqlDbType.Text, metric);
-    Console.WriteLine($"Params prepared: metric={p3.Value}");
-    var p4 = cmd.Parameters.AddWithValue("sensor_value", NpgsqlDbType.Text, sensor_value);
-    Console.WriteLine($"Params prepared: sensor_value={p4.Value}");
-    var p5 = cmd.Parameters.AddWithValue("sensor_val_f", NpgsqlDbType.Double, sensor_val_f ?? (object)DBNull.Value);
-    Console.WriteLine($"Params prepared: sensor_val_f={p5.Value}");
-    var p6 = cmd.Parameters.AddWithValue("value_dt", value_dt);
-    Console.WriteLine($"Params prepared: value_dt={p6.Value}");
-    var p7 = cmd.Parameters.AddWithValue("sensor_status", NpgsqlDbType.Text, sensor_status ?? (object)DBNull.Value);
-    Console.WriteLine($"Params prepared: sensor_status={p7.Value}");
-    //
-    try
+    // Use batch insert for multiple readings
+    var machineIdParam = cmd.Parameters.AddWithValue("machine_id", NpgsqlDbType.Text, machineId);
+    
+    // We'll execute one insert per reading for simplicity (can be optimized with batch later)
+    foreach (var reading in readings)
     {
-        await cmd.ExecuteNonQueryAsync();
-        Console.WriteLine($"Stored: {topic} -> {sensor_value}");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error: {ex.Message}");
-        Console.WriteLine($"Stack: {ex.StackTrace}");
+        cmd.Parameters.Clear();
+        cmd.Parameters.AddWithValue("machine_id", NpgsqlDbType.Text, machineId);
+        cmd.Parameters.AddWithValue("sensor_id", NpgsqlDbType.Text, reading.sensorId);
+        cmd.Parameters.AddWithValue("metric", NpgsqlDbType.Text, "value");
+        cmd.Parameters.AddWithValue("sensor_value", NpgsqlDbType.Text, reading.value?.ToString() ?? "");
+        cmd.Parameters.AddWithValue("sensor_val_f", NpgsqlDbType.Double, reading.value ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("value_dt", reading.valueDt);
+        cmd.Parameters.AddWithValue("sensor_status", NpgsqlDbType.Text, reading.status ?? (object)DBNull.Value);
+        
+        try
+        {
+            await cmd.ExecuteNonQueryAsync();
+            Console.WriteLine($"Stored: machine={machineId}, sensor={reading.sensorId}, value={reading.value}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error storing reading: {ex.Message}");
+        }
     }
 };
 
 await mqttClient.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("imm/#").Build());
-Console.WriteLine("Subscrber started. Ctrl+C to stop.");
+Console.WriteLine("Subscriber started. Ctrl+C to stop.");
 await Task.Delay(-1);  // infinite loop
