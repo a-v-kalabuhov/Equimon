@@ -28,29 +28,88 @@ while (true)
     }
 }
 
-// Simulates IMM #1, sensors, every 10 seconds
+// Configuration
+int cycleDurationSeconds = int.Parse(Environment.GetEnvironmentVariable("CYCLE_DURATION_SECONDS") ?? "12");
+int sensorIntervalSeconds = int.Parse(Environment.GetEnvironmentVariable("SENSOR_INTERVAL_SECONDS") ?? "1");
+int maxCycleCount = int.Parse(Environment.GetEnvironmentVariable("MAX_CYCLE_COUNT") ?? "1000000");
+
+Console.WriteLine($"Configuration: Cycle duration={cycleDurationSeconds}s, Sensor interval={sensorIntervalSeconds}s, Max cycle count={maxCycleCount}");
+
 var rnd = new Random();
-while (true) {
-    var timestamp = DateTime.UtcNow.ToString("o");
+int cycleCount = 0;
+double lastCycleValue = 0;
+DateTime nextCycleTime = DateTime.UtcNow.AddSeconds(cycleDurationSeconds);
 
-    // Sensor temp_001
-    var tempData = new { value = 210 + rnd.NextDouble() * 20, timestamp };
-    var tempMsg = new MqttApplicationMessageBuilder()
-        .WithTopic("imm/1/temp_sensor_001/value")
-        .WithPayload(JsonSerializer.SerializeToUtf8Bytes(tempData))
-        .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-        .Build();
-    await mqttClient.PublishAsync(tempMsg);
+// Separate tasks for cycle counter and other sensors
+var cts = new CancellationTokenSource();
 
-    // Sensor cycle_002
-    var cycleData = new { value = 22 + rnd.NextDouble() * 5, timestamp, status = "running" };
-    var cycleMsg = new MqttApplicationMessageBuilder()
-        .WithTopic("imm/1/cycle_sensor_002/cycle_time")
-        .WithPayload(JsonSerializer.SerializeToUtf8Bytes(cycleData))
-        .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-        .Build();
-    await mqttClient.PublishAsync(cycleMsg);
+// Task for other sensors (every 1 second)
+var sensorTask = Task.Run(async () =>
+{
+    while (!cts.Token.IsCancellationRequested)
+    {
+        var timestamp = DateTime.UtcNow.ToString("o");
+        
+        // Readings from non-cycle sensors
+        var readings = new List<object>
+        {
+            new { sensor_id = "temp_sensor_001", timestamp, value = 210 + rnd.NextDouble() * 20 }
+        };
+        
+        var payload = JsonSerializer.Serialize(readings);
+        var msg = new MqttApplicationMessageBuilder()
+            .WithTopic("imm/1/readings")
+            .WithPayload(Encoding.UTF8.GetBytes(payload))
+            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+            .Build();
+        
+        await mqttClient.PublishAsync(msg);
+        Console.WriteLine($"Published sensor data: {timestamp}");
+        
+        await Task.Delay(sensorIntervalSeconds * 1000, cts.Token);
+    }
+}, cts.Token);
 
-    Console.WriteLine($"Published: {timestamp}");
-    await Task.Delay(10000);  // 10 seconds
-}
+// Task for cycle counter (every cycleDurationSeconds)
+var cycleTask = Task.Run(async () =>
+{
+    while (!cts.Token.IsCancellationRequested)
+    {
+        var now = DateTime.UtcNow;
+        if (now >= nextCycleTime)
+        {
+            // Increment cycle count monotonically
+            if (cycleCount < maxCycleCount)
+            {
+                cycleCount++;
+                lastCycleValue = cycleCount;
+            }
+            
+            nextCycleTime = now.AddSeconds(cycleDurationSeconds);
+            
+            var timestamp = now.ToString("o");
+            
+            // Only send cycle sensor reading
+            var readings = new[]
+            {
+                new { sensor_id = "cycle_sensor_002", timestamp, value = lastCycleValue, status = "running" }
+            };
+            
+            var payload = JsonSerializer.Serialize(readings);
+            var msg = new MqttApplicationMessageBuilder()
+                .WithTopic("imm/1/readings")
+                .WithPayload(Encoding.UTF8.GetBytes(payload))
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                .Build();
+            
+            await mqttClient.PublishAsync(msg);
+            Console.WriteLine($"Published cycle count: {cycleCount} at {timestamp}");
+        }
+        
+        await Task.Delay(100, cts.Token); // Check every 100ms
+    }
+}, cts.Token);
+
+// Wait for any task to complete or fail
+await Task.WhenAny(sensorTask, cycleTask);
+cts.Cancel();

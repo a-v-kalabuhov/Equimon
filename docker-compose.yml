@@ -52,6 +52,10 @@ services:
       emqx:
         condition: service_healthy    
     networks: [imm-net]
+    environment:
+      - CYCLE_DURATION_SECONDS=12
+      - SENSOR_INTERVAL_SECONDS=1
+      - MAX_CYCLE_COUNT=1000000
 
   subscriber:
     build: ./MqttToPg
